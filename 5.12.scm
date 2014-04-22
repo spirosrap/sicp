@@ -1,41 +1,5 @@
-;5.11b
+;5.12 e.g. (fib-rec 'list-registers)
 
-(define (make-register name)
-  (let ((contents '*unassigned*))
-    (define (dispatch message)
-      (cond ((eq? message 'get) contents)
-            ((eq? message 'set)
-             (lambda (value) (set! contents value)))
-			((eq? message 'name) name) 
-            (else
-             (error "Unknown request -- REGISTER" message))))
-    dispatch))
-
-(define (get-reg-name register)
-	(register 'name))
-
-
-(define (make-save inst machine stack pc)
-  (let ((reg (get-register machine
-                           (stack-inst-reg-name inst))))
-    (lambda ()
-      (push stack (cons (get-reg-name reg) (get-contents reg)))
-      (advance-pc pc))))
-
-
-(define (make-restore inst machine stack pc)
-  (let ((reg (get-register machine
-                           (stack-inst-reg-name inst))))
-    (lambda ()
-		(let ((register (pop stack)))
-			(if (equal? (car register) (get-reg-name reg))
-				(begin (set-contents! reg (cdr register))
-					   (advance-pc pc))
-				(error "Saved from another variable - ASSEMBLER")	   
-	  	  	)))
-  ))
-
-;5.11c
 
 (define (make-machine register-names ops controller-text)
   (let ((machine (make-new-machine register-names)))
@@ -48,8 +12,11 @@
     ((machine 'install-operations) ops)    
     ((machine 'install-instruction-sequence)
      (assemble controller-text machine))
+	((machine 'make-list) controller-text)
+	((machine 'make-goto-reg-list) controller-text)
+	((machine 'make-savreslist) controller-text)	
+	((machine 'make-list-registers) controller-text)			  
     machine))
-
 
 ;
 (define (make-new-machine register-names)
@@ -57,7 +24,12 @@
         (flag (make-register 'flag))
         (stack (make-stack))
         (the-instruction-sequence '())
-		(stack-table '()))
+		(stack-table '())
+		(insts '())
+		(goto-reglist '())
+		(saved-restored '())
+		(list-reg-assigned '())
+		)
 		
     (let ((the-ops
            (list (list 'initialize-stack
@@ -85,7 +57,68 @@
 					(stack 'initialize)
 					  )))
           'stack-allocated)
+		  
+	  (define (reg-srcs reg text)
+	  	(cond ((null? text) '())
+	  	  ((not(pair? (car text))) (reg-srcs reg (cdr text)))
+	  	  ((and (eq? (caar text) 'assign) (eq? reg (cadar text))) (cons (cddar text) (reg-srcs reg (cdr text))))
+	  	  (else (reg-srcs reg (cdr text))))
+	  	)
 
+	  (define (lis-registers register-table text)
+	     (cond ((null? register-table) '())
+			 (else (cons (list (caar register-table) (reg-srcs (caar register-table) text)) (lis-registers (cdr register-table) text) )))	  	
+	  )
+
+	  (define (list-registers controller-text)
+		  (set! list-reg-assigned (remove-duplicates (lis-registers register-table controller-text)))
+	  )
+	  
+	  (define (remove-duplicates l)
+	    (cond ((null? l)
+	           '())
+	          ((member (car l) (cdr l))
+	           (remove-duplicates (cdr l)))
+	          (else
+	           (cons (car l) (remove-duplicates (cdr l))))))
+			   
+			   
+	  
+	  (define (sorted-list-insts controller-text)	  	
+		(set! insts (remove-duplicates(sort (list-insts controller-text) 
+					(lambda(x y) (string<? (symbol->string (car x)) (symbol->string(car y))))))
+	  ))
+		
+  	  (define (list-insts text)
+		  (cond ((null? text) '())
+				((symbol? (car text)) (list-insts (cdr text)))
+				(else (cons (car text) (list-insts (cdr text))))
+			))
+
+	  (define (reg-entry text)
+	    (cond ((null? text) '())
+	  		((and (pair? (car text)) (eq? (caar text) 'goto))
+	  			(if (and (pair? (cadar text)) (register-exp? (cadar text)))
+	  				(cons (cadr (cadar  text)) (reg-entry (cdr text)))
+	  				(reg-entry (cdr text)))
+	  		)
+	  		(else (reg-entry (cdr text)))	
+	  	))
+				
+	  (define (goto-regs controller-text)
+	  	(set! goto-reglist (remove-duplicates (reg-entry controller-text))))		  
+
+  	  (define (savrest-regs text)
+  	    (cond ((null? text) '())
+  	  		((and (pair? (car text)) (or (eq? (caar text) 'save) (eq? (caar text) 'restore)))
+				(cons (cadar text) (savrest-regs (cdr text)))
+
+  	  		)
+  	  		(else (savrest-regs (cdr text)))	
+  	  	))
+	  (define (savreslist controller-text)
+	  	(set! saved-restored (remove-duplicates (savrest-regs controller-text))))		
+			
 		
       (define (lookup-register name)
         (let ((val (assoc name register-table)))
@@ -99,7 +132,6 @@
               (cadr val)
               (error "Unknown stack:" name))))
 	  			  
-			  
       (define (execute)
         (let ((insts (get-contents pc)))
           (if (null? insts)
@@ -119,48 +151,18 @@
               ((eq? message 'install-operations)
                (lambda (ops) (set! the-ops (append the-ops ops))))
 			   
+			  ((eq? message 'instructions) insts)
+			  ((eq? message 'make-list) sorted-list-insts)
+			  ((eq? message 'make-goto-reg-list) goto-regs)
+			  ((eq? message 'goto-reglist) goto-reglist)
+			  ((eq? message 'make-savreslist) savreslist)
+			  ((eq? message 'savreslist) saved-restored)
+
+			  ((eq? message 'make-list-registers) list-registers)			  
+			  ((eq? message 'list-registers) list-reg-assigned)			  			  			  
+			  
               ((eq? message 'stack) stack-table)
 			  
               ((eq? message 'operations) the-ops)
               (else (error "Unknown request -- MACHINE" message))))
       dispatch)))
-
-;
-(define (update-insts! insts labels machine)
-  (let ((pc (get-register machine 'pc))
-        (flag (get-register machine 'flag))
-        (stack-table (machine 'stack))
-        (ops (machine 'operations)))
-    (for-each
-     (lambda (inst)
-       (set-instruction-execution-proc! 
-        inst
-        (make-execution-procedure
-         (instruction-text inst) labels machine
-         pc flag stack-table ops)))
-     insts)))
-
-;
-(define (make-execution-procedure inst labels machine
-                                  pc flag stack-table ops)
-  (cond ((eq? (car inst) 'assign)
-         (make-assign inst machine labels ops pc))
-        ((eq? (car inst) 'test)
-         (make-test inst machine labels ops flag pc))
-        ((eq? (car inst) 'branch)
-         (make-branch inst machine labels flag pc))
-        ((eq? (car inst) 'goto)
-         (make-goto inst machine labels pc))
-		 
-        ((eq? (car inst) 'save)
-		 (let ((stack (assoc (cadr inst) stack-table)))	
-         (make-save inst machine (cadr stack) pc) ))
-		 
-        ((eq? (car inst) 'restore)
-   		 (let ((stack (assoc (cadr inst) stack-table)))	
-            (make-restore inst machine (cadr stack) pc)))
-        ((eq? (car inst) 'perform)
-         (make-perform inst machine labels ops pc))
-        (else (error "Unknown instruction type -- ASSEMBLE"
-                     inst))))
-
